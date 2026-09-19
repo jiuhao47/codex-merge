@@ -128,13 +128,6 @@ def resolve_home(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def profile_label(path: Path) -> str:
-    for key, candidate in discover_homes().items():
-        if candidate == path and key != "current":
-            return key
-    return str(path)
-
-
 def launcher_for_home(path: Path, codex_binary: str = "codex") -> str:
     return f"CODEX_HOME={shlex.quote(str(path))} {shlex.quote(codex_binary)}"
 
@@ -1057,40 +1050,6 @@ def share_session(
         return child_id, backup, expected_turns
 
 
-def list_sessions(home: Path, limit: int) -> None:
-    if limit < 1:
-        raise ShareError("--limit must be greater than zero")
-    database = state_db(home)
-    if not database:
-        raise ShareError(f"state database not found under {home}")
-    with sqlite_ro(database) as connection:
-        columns = set(table_columns(connection, "main", "threads"))
-        if "id" not in columns:
-            raise ShareError(f"unsupported Codex state schema: {database}")
-        title_columns = [name for name in ("name", "title", "first_user_message", "preview") if name in columns]
-        title_expr = ("COALESCE(" + ", ".join([*title_columns, "''"]) + ")"
-                      if title_columns else "''")
-        time_columns = [name for name in ("updated_at_ms", "recency_at_ms") if name in columns]
-        time_columns += [f"{name} * 1000" for name in ("updated_at", "recency_at") if name in columns]
-        order_expr = ("COALESCE(" + ", ".join([*time_columns, "0"]) + ")"
-                      if time_columns else "0")
-        cwd_expr = "cwd" if "cwd" in columns else "''"
-        archived_expr = "WHERE COALESCE(archived, 0)=0" if "archived" in columns else ""
-        rows = connection.execute(
-            f"SELECT id, {title_expr}, {cwd_expr}, {order_expr} AS updated "
-            f"FROM threads {archived_expr} ORDER BY updated DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    print(f"HOME {profile_label(home)}  {home}")
-    for thread_id, title, cwd, updated in rows:
-        compact_title = " ".join(str(title or "").split())[:72] or "(untitled)"
-        date = "-"
-        if updated:
-            date = dt.datetime.fromtimestamp(int(updated) / 1000).strftime("%Y-%m-%d %H:%M")
-        print(f"{str(thread_id)[:12]}  {date}  {compact_title}")
-        print(f"              {cwd}")
-
-
 def show_homes() -> None:
     homes = discover_homes()
     if not homes:
@@ -1106,106 +1065,6 @@ def show_homes() -> None:
         suffix = f" ({', '.join(aliases)})" if aliases else ""
         auth = "auth.json present" if (path / "auth.json").is_file() else "no auth.json"
         print(f"{label}{suffix}  {path}  [{auth}]")
-
-
-BASH_COMPLETION = r"""# Bash built-ins only; source with: source <(codex-merge completion bash)
-_codex_merge_complete() {
-    local cur="${COMP_WORDS[COMP_CWORD]:-}"
-    local -a previous=()
-    if (( COMP_CWORD > 1 )); then
-        previous=("${COMP_WORDS[@]:1:COMP_CWORD-1}")
-    fi
-    COMPREPLY=()
-    if [[ "$cur" == */* ]]; then
-        mapfile -t COMPREPLY < <(compgen -d -- "$cur")
-        compopt -o filenames
-        return
-    fi
-    if ((${#previous[@]})) && [[ "${previous[-1]}" == --codex-bin ]]; then
-        mapfile -t COMPREPLY < <(compgen -f -- "$cur")
-        compopt -o filenames
-        return
-    fi
-    mapfile -t COMPREPLY < <(codex-merge _complete "${previous[@]}" "$cur")
-}
-complete -o bashdefault -o default -F _codex_merge_complete codex-merge
-"""
-
-
-def completion_session_ids(home: Path, prefix: str, limit: int = 100) -> list[str]:
-    database = state_db(home)
-    if database:
-        try:
-            with sqlite_ro(database) as connection:
-                columns = set(table_columns(connection, "main", "threads"))
-                if "id" in columns:
-                    order = next((column for column in
-                                  ("updated_at_ms", "updated_at", "created_at_ms", "created_at")
-                                  if column in columns), "id")
-                    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%")
-                    escaped = escaped.replace("_", "\\_")
-                    rows = connection.execute(
-                        f"SELECT id FROM threads WHERE id LIKE ? ESCAPE '\\' "
-                        f"ORDER BY {order} DESC LIMIT ?", (escaped + "%", limit),
-                    ).fetchall()
-                    return [str(row[0]) for row in rows if str(row[0]).startswith(prefix)]
-        except sqlite3.Error:
-            pass
-    found: list[tuple[int, str]] = []
-    for path in rollout_paths(home):
-        if path.suffix != ".jsonl":
-            continue
-        thread_id = path.stem[-36:]
-        if UUID_RE.fullmatch(thread_id) and thread_id.startswith(prefix):
-            found.append((path.stat().st_mtime_ns, thread_id))
-    found.sort(reverse=True)
-    return list(dict.fromkeys(thread_id for _, thread_id in found))[:limit]
-
-
-def completion_candidates(words: list[str], current: str) -> list[str]:
-    homes = discover_homes()
-    positionals: list[str] = []
-    waiting_for_value = False
-    for word in words:
-        if waiting_for_value:
-            waiting_for_value = False
-        elif word in {"--codex-bin", "--limit", "-n"}:
-            waiting_for_value = True
-        elif not word.startswith("-"):
-            positionals.append(word)
-    if waiting_for_value:
-        return []
-    commands = {"homes", "list", "fork", "completion"}
-    explicit_command = bool(positionals and positionals[0] in commands)
-    command = positionals.pop(0) if explicit_command else "fork"
-    if not positionals and not explicit_command and not current.startswith("-"):
-        choices = ["homes", "list", "fork", "completion", *homes]
-    elif command == "completion":
-        choices = ["bash"] if not positionals else []
-    elif current.startswith("-"):
-        choices = ["--help", "-h"]
-        if not explicit_command and not positionals:
-            choices += ["--codex-bin", "--version"]
-        if command == "list":
-            choices += ["--limit", "-n"]
-        elif command == "fork" and (explicit_command or positionals):
-            choices += ["--dry-run", "-n", "--resume", "-r"]
-    elif command == "homes":
-        choices = []
-    elif command == "list":
-        choices = list(homes) if not positionals else []
-    elif len(positionals) < 2:
-        choices = list(homes)
-        if len(positionals) == 1 and positionals[0] in homes:
-            choices = [name for name in choices if homes[name] != homes[positionals[0]]]
-    elif len(positionals) == 2:
-        try:
-            choices = completion_session_ids(resolve_home(positionals[0]), current)
-        except (ShareError, OSError):
-            choices = []
-    else:
-        choices = []
-    return sorted({choice for choice in choices if choice.startswith(current)})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1224,20 +1083,14 @@ def build_parser() -> argparse.ArgumentParser:
   codex-merge homes
       自动查找本机 CODEX_HOME。
 
-  codex-merge list
-      查看当前 CODEX_HOME 最近的 Session。
+  codex-merge primary secondary 01a0ad83-f4e --dry-run
+      预览从 primary 到 secondary 的迁移；Session ID 可以使用唯一前缀。
 
-  source <(codex-merge completion bash)
-      在当前 Bash 中启用命令、HOME 和 Session ID 补全。
-
-  codex-merge z c 01a0ad83-f4e --dry-run
-      预览从 zhangzy 到 caoly 的迁移；Session ID 可以使用唯一前缀。
-
-  codex-merge z c 01a0ad83-f4e
+  codex-merge primary secondary 01a0ad83-f4e
       创建安全 fork，完成后打印新 Session ID 和 resume 命令。
 
-  codex-merge z c 01a0ad83-f4e --resume
-      创建 fork，并立即使用 caoly HOME 继续该 Session。
+  codex-merge primary secondary 01a0ad83-f4e --resume
+      创建 fork，并立即使用 secondary HOME 继续该 Session。
 
 完整写法:
   codex-merge fork SOURCE TARGET SESSION [--dry-run] [--resume]
@@ -1263,34 +1116,6 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="示例:\n  codex-merge homes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    completion_parser = subparsers.add_parser(
-        "completion", help="输出 Bash 补全脚本（无需 bash-completion）"
-    )
-    completion_parser.add_argument("shell", choices=("bash",))
-    list_parser = subparsers.add_parser(
-        "list",
-        help="列出某个 HOME 最近的 Session",
-        description=(
-            "列出指定 CODEX_HOME 中最近的非归档 Session。\n"
-            "输出包含可用于 fork 的 Session ID 前缀、更新时间、标题和工作目录。"
-        ),
-        epilog="""示例:
-  codex-merge list
-      显示当前 HOME 最近 20 个 Session。
-
-  codex-merge list c --limit 50
-      显示 caoly 最近 50 个 Session。
-
-  codex-merge list /path/to/custom/.codex
-      也可以直接传入自定义 CODEX_HOME 路径。""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    list_parser.add_argument(
-        "home", nargs="?", default="current", metavar="HOME", help="HOME 名称或目录路径（默认：current）"
-    )
-    list_parser.add_argument(
-        "-n", "--limit", type=int, default=20, metavar="COUNT", help="最多显示多少个（默认：20）"
-    )
     fork_parser = subparsers.add_parser(
         "fork",
         help="把一个 Session 安全 fork 到另一个 HOME",
@@ -1300,20 +1125,20 @@ def build_parser() -> argparse.ArgumentParser:
             "目标 Session 使用新的 ID，因此两个账号之后可以并行、独立继续。"
         ),
         epilog="""示例:
-  codex-merge fork z c 01a0ad83-f4e --dry-run
+  codex-merge fork primary secondary 01a0ad83-f4e --dry-run
       只检查 Session、历史链和目标位置，不写入目标 HOME。
 
-  codex-merge fork z c 01a0ad83-f4e
-      从 zhangzy fork 到 caoly，完成后打印新 ID 和 resume 命令。
+  codex-merge fork primary secondary 01a0ad83-f4e
+      从 primary fork 到 secondary，完成后打印新 ID 和 resume 命令。
 
-  codex-merge fork z c 01a0ad83-f4e --resume
-      迁移成功后立即使用 caoly HOME 进入新 Session。
+  codex-merge fork primary secondary 01a0ad83-f4e --resume
+      迁移成功后立即使用 secondary HOME 进入新 Session。
 
-  codex-merge z c 01a0ad83-f4e -r
+  codex-merge primary secondary 01a0ad83-f4e -r
       与上一条等价的简写。
 
-  codex-merge c j 01a01234
-      从 caoly fork 到 jiuhao；唯一的 Session ID 前缀即可。
+  codex-merge secondary default 01a01234
+      迁移到默认 HOME；唯一的 Session ID 前缀即可。
 
 注意:
   这是一次性 fork，不是实时双向同步。目标数据库会先备份到
@@ -1338,8 +1163,6 @@ def build_parser() -> argparse.ArgumentParser:
     for child, positional_title in (
         (parser, "子命令"),
         (homes_parser, "位置参数"),
-        (completion_parser, "位置参数"),
-        (list_parser, "位置参数"),
         (fork_parser, "位置参数"),
     ):
         child._positionals.title = positional_title
@@ -1351,7 +1174,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def normalize_shorthand(argv: list[str]) -> list[str]:
-    commands = {"homes", "list", "fork", "completion", "-h", "--help"}
+    commands = {"homes", "fork", "-h", "--help"}
     if argv and not argv[0].startswith("-") and argv[0] not in commands and len(argv) >= 3:
         return ["fork", *argv]
     return argv
@@ -1359,22 +1182,12 @@ def normalize_shorthand(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
-    if raw_arguments and raw_arguments[0] == "_complete":
-        for candidate in completion_candidates(raw_arguments[1:-1], raw_arguments[-1] if len(raw_arguments) > 1 else ""):
-            print(candidate)
-        return 0
     arguments = normalize_shorthand(raw_arguments)
     parser = build_parser()
     args = parser.parse_args(arguments)
     try:
         if args.command == "homes":
             show_homes()
-            return 0
-        if args.command == "completion":
-            print(BASH_COMPLETION, end="")
-            return 0
-        if args.command == "list":
-            list_sessions(resolve_home(args.home), args.limit)
             return 0
         source = resolve_home(args.source)
         target = resolve_home(args.target)

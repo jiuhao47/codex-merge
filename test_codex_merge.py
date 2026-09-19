@@ -2,7 +2,6 @@ import contextlib
 import io
 import json
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,45 +23,11 @@ def write_rollout(path: Path, thread_id: str, base: dict | None = None) -> None:
 
 
 class CodexMergeTests(unittest.TestCase):
-    def test_bash_completion_uses_builtin_registration(self) -> None:
-        result = subprocess.run(
-            ["bash", "-c", "source /dev/stdin; complete -p codex-merge; "
-             "! complete -p codex-share >/dev/null 2>&1; "
-             "! complete -p csx >/dev/null 2>&1"],
-            input=codex_merge.BASH_COMPLETION,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        self.assertIn("_codex_merge_complete", result.stdout)
-        self.assertIn("compgen", codex_merge.BASH_COMPLETION)
-
-    def test_completion_uses_selected_source_home(self) -> None:
-        thread_id = "11111111-1111-4111-8111-111111111111"
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            source = root / "source"
-            target = root / "target"
-            source.mkdir()
-            target.mkdir()
-            with sqlite3.connect(source / "state_1.sqlite") as connection:
-                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at_ms INTEGER)")
-                connection.execute("INSERT INTO threads VALUES (?, 1)", (thread_id,))
-            homes = {"source": source, "s": source, "target": target, "t": target}
-            with mock.patch.object(codex_merge, "discover_homes", return_value=homes):
-                self.assertIn("fork", codex_merge.completion_candidates([], "f"))
-                self.assertEqual(codex_merge.completion_candidates(["fork", "source"], "t"),
-                                 ["t", "target"])
-                self.assertEqual(codex_merge.completion_candidates(["fork", "source", "target"],
-                                                                    "1111"), [thread_id])
-                self.assertEqual(codex_merge.completion_candidates(["source", "target"],
-                                                                    "1111"), [thread_id])
-                self.assertEqual(codex_merge.completion_candidates(["list"], "s"),
-                                 ["s", "source"])
-
     def test_help_contains_examples_and_explains_fork(self) -> None:
         help_text = codex_merge.build_parser().format_help()
-        self.assertIn("codex-merge z c 01a0ad83-f4e --resume", help_text)
+        self.assertIn("codex-merge primary secondary 01a0ad83-f4e --resume", help_text)
+        self.assertNotIn("  list", help_text)
+        self.assertNotIn("completion", help_text)
         self.assertIn("一次性快照", help_text)
 
         output = io.StringIO()
@@ -74,24 +39,41 @@ class CodexMergeTests(unittest.TestCase):
 
     def test_resolve_home_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            root = Path(name) / "jiuhao"
-            for dirname in (".codex", ".codex_share_caoly", ".codex_zhangzy"):
+            root = Path(name) / "tester"
+            for dirname in (".codex", ".codex_share_primary", ".codex_secondary"):
                 home = root / dirname
                 home.mkdir(parents=True)
                 (home / "config.toml").touch()
             homes = codex_merge.discover_homes(root, "")
             with mock.patch.object(codex_merge, "discover_homes", return_value=homes):
-                self.assertEqual(codex_merge.resolve_home("j"), root / ".codex")
-                self.assertEqual(codex_merge.resolve_home("c"), root / ".codex_share_caoly")
-                self.assertEqual(codex_merge.resolve_home("z"), root / ".codex_zhangzy")
+                self.assertEqual(codex_merge.resolve_home("t"), root / ".codex")
+                self.assertEqual(codex_merge.resolve_home("p"), root / ".codex_share_primary")
+                self.assertEqual(codex_merge.resolve_home("s"), root / ".codex_secondary")
             self.assertEqual(
-                codex_merge.launcher_for_home(root / ".codex_zhangzy"),
-                f"CODEX_HOME={root / '.codex_zhangzy'} codex",
+                codex_merge.launcher_for_home(root / ".codex_secondary"),
+                f"CODEX_HOME={root / '.codex_secondary'} codex",
             )
+
+    def test_direct_migration_accepts_full_names_and_short_names(self) -> None:
+        session_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "primary"
+            target = root / "secondary"
+            homes = {"primary": source, "p": source, "secondary": target, "s": target}
+            with mock.patch.object(codex_merge, "discover_homes", return_value=homes), \
+                 mock.patch.object(codex_merge, "share_session", return_value=("", None, 0)) as share:
+                for source_name, target_name in (("primary", "secondary"), ("p", "s")):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            codex_merge.main([source_name, target_name, session_id, "--dry-run"]), 0
+                        )
+                    self.assertEqual(share.call_args.args[:3], (source, target, session_id))
+                    self.assertTrue(share.call_args.kwargs["dry_run"])
 
     def test_discovers_homes_and_current_without_reading_auth(self) -> None:
         with tempfile.TemporaryDirectory() as name:
-            root = Path(name) / "jiuhao"
+            root = Path(name) / "operator"
             root.mkdir()
             default = root / ".codex"
             default.mkdir()
@@ -116,26 +98,6 @@ class CodexMergeTests(unittest.TestCase):
             self.assertNotIn("unrelated", homes)
             self.assertEqual(codex_merge.launcher_for_home(external),
                              f"CODEX_HOME='{external}' codex")
-
-    def test_list_sessions_accepts_older_state_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            home = Path(name)
-            with sqlite3.connect(home / "state_1.sqlite") as connection:
-                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, updated_at INTEGER)")
-                connection.execute("INSERT INTO threads VALUES ('abc', 'Old title', 1000)")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                codex_merge.list_sessions(home, 1)
-            self.assertIn("Old title", output.getvalue())
-            with self.assertRaisesRegex(codex_merge.ShareError, "greater than zero"):
-                codex_merge.list_sessions(home, 0)
-            with sqlite3.connect(home / "state_2.sqlite") as connection:
-                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)")
-                connection.execute("INSERT INTO threads VALUES ('minimal')")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                codex_merge.list_sessions(home, 1)
-            self.assertIn("minimal", output.getvalue())
 
     def test_app_server_handles_batched_messages(self) -> None:
         with tempfile.TemporaryDirectory() as name:

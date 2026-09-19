@@ -1,6 +1,6 @@
 # codex-merge
 
-在两个独立的 `CODEX_HOME` 之间复制一次 Codex 会话快照。工具使用 Codex 的 app-server 创建 fork，并把它导入目标 HOME。目标会话获得新的 ID；此后两边可以分别继续，对话不会自动同步。
+当前会话遇到账号访问限制或 token 额度不足时，指定会话 ID，把它从一个 `CODEX_HOME` 迁移到另一个。工具使用 Codex 的 app-server 创建 fork，并把它导入目标 HOME。目标会话获得新的 ID；此后两边可以分别继续，对话不会自动同步。
 
 ## 运行要求与入口
 
@@ -29,36 +29,23 @@ codex-merge homes
 ## 复制会话
 
 ```bash
-codex-merge list                 # 当前 CODEX_HOME，未设置时使用 ~/.codex
-codex-merge list SOURCE --limit 50
 codex-merge SOURCE TARGET SESSION --dry-run
 codex-merge SOURCE TARGET SESSION
 codex-merge SOURCE TARGET SESSION --resume
 ```
 
-`SOURCE` 和 `TARGET` 是 `homes` 列出的名称或目录路径。`SESSION` 可使用完整 UUID 或至少 4 个字符的唯一 UUID 前缀。`list` 显示最近的非归档会话及 ID 前 12 位；如果前缀有歧义，使用更长的 ID。完整写法为 `codex-merge fork SOURCE TARGET SESSION`。
+`SOURCE` 和 `TARGET` 是 `homes` 列出的名称或目录路径。`SESSION` 使用当前会话的完整 UUID；也可以使用至少 4 个字符、能够唯一匹配的 UUID 前缀。完整写法为 `codex-merge fork SOURCE TARGET SESSION`。
 
-例如，本机 `homes` 若显示 `z` 和 `c`，可以运行：
+例如，本机 `homes` 若显示 `primary` 和 `secondary`，可以运行：
 
 ```bash
-codex-merge list z
-codex-merge z c 01a0ad83 --dry-run
-codex-merge z c 01a0ad83
+codex-merge primary secondary 01a0ad83-f4e0-4000-8000-000000000000 --dry-run
+codex-merge primary secondary 01a0ad83-f4e0-4000-8000-000000000000 --resume
 ```
 
 成功后会打印新会话 ID、备份目录、核对过的 turn 数和带有目标 `CODEX_HOME` 的 `codex resume` 命令。`--resume` 会在完成导入后直接运行该命令。
 
 `--dry-run` 只读检查源会话的历史链、所需历史边界及目标已有 rollout 是否冲突，并显示目标目录是否存在。它不会创建 fork，也不会执行完整的数据库导入与 app-server 验证；正式运行仍可能发现其他问题。
-
-## Bash 补全
-
-在当前 Bash 中启用，无需安装 `bash-completion`：
-
-```bash
-source <(codex-merge completion bash)
-```
-
-将这行加入 `~/.bashrc`，新开的 Bash 也会启用。补全支持子命令、选项、发现的 HOME 名称、目录路径，以及所选源 HOME 中的会话 ID。
 
 ## 数据与限制
 
