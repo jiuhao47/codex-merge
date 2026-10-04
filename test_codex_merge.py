@@ -49,6 +49,10 @@ class CodexMergeTests(unittest.TestCase):
                 self.assertEqual(codex_merge.resolve_home("t"), root / ".codex")
                 self.assertEqual(codex_merge.resolve_home("p"), root / ".codex_share_primary")
                 self.assertEqual(codex_merge.resolve_home("s"), root / ".codex_secondary")
+                self.assertEqual(codex_merge.profile_label(root / ".codex"), "default")
+                self.assertEqual(
+                    codex_merge.profile_label(root / ".codex_secondary"), "secondary"
+                )
             self.assertEqual(
                 codex_merge.launcher_for_home(root / ".codex_secondary"),
                 f"CODEX_HOME={root / '.codex_secondary'} codex",
@@ -199,6 +203,42 @@ class CodexMergeTests(unittest.TestCase):
                 1,
             )
             connection.close()
+
+    def test_merge_state_rows_attaches_read_only_uri(self) -> None:
+        thread_id = "44444444-4444-4444-8444-444444444444"
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source_home = root / "source?#"
+            target_home = root / "target"
+            source_home.mkdir()
+            target_home.mkdir()
+            rollout = source_home / "sessions" / f"rollout-x-{thread_id}.jsonl"
+            write_rollout(rollout, thread_id)
+
+            for home in (source_home, target_home):
+                connection = sqlite3.connect(home / "state_1.sqlite")
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)"
+                )
+                connection.close()
+
+            connection = sqlite3.connect(source_home / "state_1.sqlite")
+            connection.execute(
+                "INSERT INTO threads VALUES (?, ?)", (thread_id, str(rollout))
+            )
+            connection.commit()
+            connection.close()
+
+            counts = codex_merge.merge_state_rows(source_home, target_home, [thread_id])
+            self.assertEqual(counts["threads"], 1)
+            connection = sqlite3.connect(target_home / "state_1.sqlite")
+            path = connection.execute(
+                "SELECT rollout_path FROM threads WHERE id=?", (thread_id,)
+            ).fetchone()[0]
+            connection.close()
+            self.assertEqual(
+                path, str(target_home / rollout.relative_to(source_home))
+            )
 
     def test_clone_history_schema_copies_no_session_rows(self) -> None:
         with tempfile.TemporaryDirectory() as name:

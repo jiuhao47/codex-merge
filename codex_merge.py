@@ -128,6 +128,13 @@ def resolve_home(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def profile_label(path: Path) -> str:
+    for key, candidate in discover_homes().items():
+        if candidate == path and key != "current":
+            return key
+    return str(path)
+
+
 def launcher_for_home(path: Path, codex_binary: str = "codex") -> str:
     return f"CODEX_HOME={shlex.quote(str(path))} {shlex.quote(codex_binary)}"
 
@@ -611,7 +618,7 @@ def merge_history_rows(source: Path, target: Path, thread_ids: Iterable[str]) ->
         raise ShareError(f"target paginated history database is missing: {target}")
 
     counts: dict[str, int] = {}
-    connection = sqlite3.connect(target, timeout=30)
+    connection = sqlite3.connect(target, timeout=30, uri=True)
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("ATTACH DATABASE ? AS src", (source.resolve().as_uri() + "?mode=ro",))
     try:
@@ -678,7 +685,7 @@ def merge_state_rows(
     if not source or not target:
         raise ShareError("source or target state database is missing")
     counts: dict[str, int] = {}
-    connection = sqlite3.connect(target, timeout=30)
+    connection = sqlite3.connect(target, timeout=30, uri=True)
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("ATTACH DATABASE ? AS src", (source.resolve().as_uri() + "?mode=ro",))
     try:
